@@ -1,0 +1,20 @@
+# Tmux Session & Window Management
+# Essential shortcuts and commands for Tmux multiplexer
+
+# Start a named new session
+tmux new-session -s <session_name>
+
+# List all active sessions
+tmux list-sessions
+
+# Attach to an existing session by name
+tmux attach-session -t <session_name>
+
+# Kill a session by name
+tmux kill-session -t <session_name>
+
+# Split window horizontally into left and right panes
+tmux split-window -h
+
+# Split window vertically into top and bottom panes
+tmux split-window -v

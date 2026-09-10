@@ -1,0 +1,2250 @@
+#!/usr/bin/env python3
+"""
+cheat-sheet - Advanced command cheatsheet viewer & terminal launcher.
+
+Features:
+- Multi-source documentation: personal sheets, cheat.sh (online & cached), man pages, --help.
+- Instant offline cache in ~/.cache/cheat-sheet/.
+- Custom personal sheets in ~/.cheat-sheet/sheets/ and ~/.config/cheat-sheet/sheets/.
+- Interactive 'c' menu with instant loading, live search filter, and Esc to cancel.
+- Interactive 'a' menu to browse, filter, and paste shell aliases directly into the terminal prompt.
+- Welcome guide page automatically shown when Enter is pressed on an empty prompt.
+- Instant Esc response without key delay and automatic timeout for flash messages.
+- Interactive command selection with Tab / Shift+Tab and full-line background highlight.
+- Instant copy with 'y' (OSC 52, xclip, wl-copy, tmux buffer).
+- Terminal injection with Enter (types directly into the caller tmux pane prompt).
+- In-document search with '/' and 'n'/'N' navigation, featuring distinct active-match highlight
+  and automatic command selection when matches hit commands or their descriptions.
+- Dynamic source cycling with 't' (cheat.sh <-> man <-> --help <-> personal).
+- Session history navigation with '[' / ']' or 'H' / 'L'.
+- Smart word wrapping tailored for narrow side panes (e.g. 35% tmux splits).
+- Native terminal color palette matching the user's theme (Nord default + Dracula, Gruvbox, etc.).
+- Smooth mouse wheel scrolling and keyboard navigation.
+
+Zero external Python dependencies (pure Python 3 standard library).
+"""
+
+import sys
+import os
+import re
+import time
+import shutil
+import base64
+import subprocess
+import urllib.request
+import urllib.error
+
+# Ensure minimal escape sequence delay for instantaneous Esc handling
+os.environ.setdefault("ESCDELAY", "25")
+
+try:
+    import curses
+    import curses.ascii
+except ImportError:
+    curses = None
+
+
+# ----------------------------------------------------------------------
+# Paths & Configuration
+# ----------------------------------------------------------------------
+
+CACHE_DIR = os.environ.get("CHEAT_SHEET_CACHE_DIR", os.path.expanduser("~/.cache/cheat-sheet"))
+XDG_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+XDG_DATA_HOME = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+
+PERSONAL_SHEETS_DIRS = [
+    os.path.expanduser("~/.cheat-sheet/sheets"),
+    os.path.expanduser("~/.cheat-sheet"),
+    os.path.join(XDG_CONFIG_HOME, "cheat-sheet", "sheets"),
+    os.path.join(XDG_CONFIG_HOME, "cheat-sheet"),
+    os.path.join(XDG_DATA_HOME, "cheat-sheet", "sheets"),
+    os.path.join(XDG_DATA_HOME, "cheat-sheet"),
+]
+
+HEADER_RE = re.compile(
+    r"^(NAME|SYNOPSIS|DESCRIPTION|OPTIONS|EXAMPLES|SEE ALSO|FILES|ENVIRONMENT|COMMANDS|"
+    r"Usage:|Options:|Commands:|Arguments:|Global Options:)",
+    re.IGNORECASE,
+)
+
+
+# ==============================================================================
+# Theme & Colors Configuration
+# ==============================================================================
+# Customize the variables below to easily change the theme of each UI element.
+# Supported values:
+#   - Standard color names: "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "default"
+#   - 256-color palette numbers: 0 to 255 (e.g. 237 for dark gray background)
+#   - curses constants: curses.COLOR_CYAN, etc.
+
+# UI Elements (Nord Palette Default)
+COLOR_HEADER = "blue"
+COLOR_FOOTER = "white"
+COLOR_PROMPT = "cyan"
+COLOR_FLASH = "cyan"
+
+# Syntax & Documentation Highlighting
+COLOR_COMMAND = "cyan"
+COLOR_FLAG = "yellow"
+COLOR_PARAM = "blue"
+COLOR_ARG = "white"
+COLOR_COMMENT = "blue"
+COLOR_SECTION_HEADER = "cyan"
+
+# Search Match Highlighting
+COLOR_SEARCH_INACTIVE_FG = "black"
+COLOR_SEARCH_INACTIVE_BG = "yellow"
+COLOR_SEARCH_ACTIVE_FG = "black"
+COLOR_SEARCH_ACTIVE_BG = "cyan"
+
+# Selected Command Row (Highlighted Background)
+COLOR_SELECTED_BG = 238                # 256-color Nord polar night dark gray
+COLOR_SELECTED_BG_FALLBACK = "blue"
+COLOR_SELECTED_COMMAND = "cyan"
+COLOR_SELECTED_FLAG = "yellow"
+COLOR_SELECTED_PARAM = "blue"
+COLOR_SELECTED_ARG = "white"
+COLOR_SELECTED_COMMENT = "blue"
+COLOR_SELECTED_BASE = "white"
+
+# Menus (Personal Sheets 'c' & Shell Aliases 'a')
+COLOR_MENU_HEADER = "blue"
+COLOR_MENU_PROMPT = "cyan"
+COLOR_MENU_ITEM = "cyan"
+COLOR_MENU_DESC = "blue"
+COLOR_MENU_BADGE_ZSHRC = "cyan"
+COLOR_MENU_BADGE_SHELL = "white"
+COLOR_MENU_FOOTER = "white"
+
+# Optional Theme Preset: None (uses variables above - Nord default), "classic", "dracula", "nord", "gruvbox", "catppuccin", "monokai"
+# Can also be specified via the CHEAT_SHEET_THEME environment variable.
+THEME_PRESET = os.environ.get("CHEAT_SHEET_THEME", None)
+
+THEME_PRESETS = {
+    "classic": {
+        "header": "blue",
+        "footer": "white",
+        "prompt": "yellow",
+        "flash": "green",
+        "command": "green",
+        "flag": "yellow",
+        "param": "blue",
+        "arg": "white",
+        "comment": "cyan",
+        "section_header": "magenta",
+        "search_active_bg": "green",
+        "selected_command": "green",
+        "selected_flag": "yellow",
+        "selected_param": "blue",
+        "selected_comment": "cyan",
+        "menu_header": "blue",
+        "menu_item": "green",
+        "menu_desc": "cyan",
+        "menu_badge_zshrc": "cyan",
+    },
+    "dracula": {
+        "header": "magenta",
+        "footer": "cyan",
+        "prompt": "yellow",
+        "flash": "green",
+        "command": "green",
+        "flag": "yellow",
+        "param": "magenta",
+        "arg": "white",
+        "comment": "cyan",
+        "section_header": "magenta",
+        "search_active_bg": "green",
+        "selected_command": "green",
+        "selected_flag": "yellow",
+        "selected_param": "magenta",
+        "selected_comment": "cyan",
+        "menu_header": "magenta",
+        "menu_badge_zshrc": "magenta",
+    },
+    "nord": {
+        "header": "blue",
+        "footer": "white",
+        "prompt": "cyan",
+        "flash": "cyan",
+        "command": "cyan",
+        "flag": "yellow",
+        "param": "blue",
+        "arg": "white",
+        "comment": "blue",
+        "section_header": "cyan",
+        "search_active_bg": "cyan",
+        "selected_command": "cyan",
+        "selected_flag": "yellow",
+        "selected_param": "blue",
+        "selected_comment": "blue",
+        "menu_header": "blue",
+        "menu_item": "cyan",
+        "menu_badge_zshrc": "cyan",
+    },
+    "gruvbox": {
+        "header": "yellow",
+        "footer": "white",
+        "prompt": "yellow",
+        "flash": "green",
+        "command": "green",
+        "flag": "yellow",
+        "param": "blue",
+        "arg": "white",
+        "comment": "cyan",
+        "section_header": "yellow",
+        "search_active_bg": "green",
+        "selected_command": "green",
+        "selected_flag": "yellow",
+        "selected_param": "blue",
+        "selected_comment": "cyan",
+        "menu_header": "yellow",
+        "menu_item": "green",
+        "menu_badge_zshrc": "yellow",
+    },
+    "catppuccin": {
+        "header": "magenta",
+        "footer": "white",
+        "prompt": "yellow",
+        "flash": "green",
+        "command": "green",
+        "flag": "yellow",
+        "param": "blue",
+        "arg": "white",
+        "comment": "cyan",
+        "section_header": "magenta",
+        "search_active_bg": "green",
+        "selected_command": "green",
+        "selected_flag": "yellow",
+        "selected_param": "blue",
+        "selected_comment": "cyan",
+        "menu_header": "magenta",
+        "menu_item": "green",
+        "menu_badge_zshrc": "magenta",
+    },
+    "monokai": {
+        "header": "yellow",
+        "footer": "white",
+        "prompt": "yellow",
+        "flash": "green",
+        "command": "green",
+        "flag": "yellow",
+        "param": "magenta",
+        "arg": "white",
+        "comment": "cyan",
+        "section_header": "magenta",
+        "search_active_bg": "green",
+        "selected_command": "green",
+        "selected_flag": "yellow",
+        "selected_param": "magenta",
+        "selected_comment": "cyan",
+        "menu_header": "yellow",
+        "menu_item": "green",
+        "menu_badge_zshrc": "yellow",
+    },
+}
+
+
+def get_theme_color(key, default=None):
+    """Retrieve theme color considering active preset and direct variables."""
+    if THEME_PRESET and THEME_PRESET in THEME_PRESETS:
+        preset = THEME_PRESETS[THEME_PRESET]
+        if key in preset:
+            return preset[key]
+
+    var_name = f"COLOR_{key.upper()}"
+    return globals().get(var_name, default)
+
+
+def resolve_curses_color(val, default=None):
+    """Convert color string, integer, or curses constant to a curses color integer."""
+    if default is None and curses is not None:
+        default = curses.COLOR_WHITE
+
+    if val is None:
+        return default
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if curses is not None:
+            mapping = {
+                "black": curses.COLOR_BLACK,
+                "red": curses.COLOR_RED,
+                "green": curses.COLOR_GREEN,
+                "yellow": curses.COLOR_YELLOW,
+                "blue": curses.COLOR_BLUE,
+                "magenta": curses.COLOR_MAGENTA,
+                "cyan": curses.COLOR_CYAN,
+                "white": curses.COLOR_WHITE,
+                "default": -1,
+                "none": -1,
+                "transparent": -1,
+            }
+            if v in mapping:
+                return mapping[v]
+        if v.isdigit():
+            return int(v)
+    return default
+
+
+def to_ansi_escape(color_val, is_bold=False, is_dim=False, is_underline=False):
+    """Convert color name or integer into ANSI terminal escape code."""
+    codes = []
+    if is_bold:
+        codes.append("1")
+    if is_dim:
+        codes.append("2")
+    if is_underline:
+        codes.append("4")
+
+    c = resolve_curses_color(color_val, 7)
+    if isinstance(c, int):
+        if 0 <= c <= 7:
+            ansi_map = {0: 30, 1: 31, 2: 32, 3: 33, 4: 34, 5: 35, 6: 36, 7: 37}
+            codes.append(str(ansi_map.get(c, 37)))
+        elif c > 7:
+            codes.append(f"38;5;{c}")
+
+    if not codes:
+        return ""
+    return "\033[" + ";".join(codes) + "m"
+
+
+class ColorPairs:
+    """Semantic color pair IDs for curses rendering."""
+    COMMENT = 1
+    COMMAND = 2
+    FLAG = 3
+    SECTION_HEADER = 4
+    HEADER = 5
+    FOOTER = 6
+    PARAM = 7
+    SEARCH_INACTIVE = 8
+    SEARCH_ACTIVE = 9
+    SELECTED_COMMAND = 10
+    SELECTED_FLAG = 11
+    SELECTED_PARAM = 12
+    SELECTED_ARG = 13
+    SELECTED_ROW_FILL = 14
+    SELECTED_COMMENT = 15
+    PROMPT = 16
+    FLASH = 17
+    MENU_HEADER = 18
+    MENU_PROMPT = 19
+    MENU_ITEM = 20
+    MENU_DESC = 21
+    MENU_BADGE_ZSHRC = 22
+    MENU_BADGE_SHELL = 23
+    MENU_FOOTER = 24
+
+
+# ----------------------------------------------------------------------
+# Helper Utilities
+# ----------------------------------------------------------------------
+
+def strip_ansi(text):
+    """Remove ANSI escape sequences and backspace formatting."""
+    text = re.sub(r".\x08", "", text)
+    return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+
+
+def set_cursor_visibility(visible):
+    """Safely set cursor visibility without raising exceptions."""
+    if curses is None:
+        return
+    try:
+        curses.curs_set(1 if visible else 0)
+    except Exception:
+        pass
+
+
+def copy_to_clipboard(text):
+    """
+    Copy text to clipboard using available system mechanisms:
+    1. Tmux buffer (if inside tmux)
+    2. Native clipboard tools (xclip, wl-copy, xsel, pbcopy)
+    3. OSC 52 terminal sequence (direct emulator clipboard)
+    """
+    if not text:
+        return False
+
+    success = False
+
+    # 1. Tmux buffer
+    if os.environ.get("TMUX"):
+        try:
+            subprocess.run(["tmux", "set-buffer", text], check=False, timeout=1.0)
+            success = True
+        except Exception:
+            pass
+
+    # 2. System clipboard tools
+    for tool, args in [
+        ("wl-copy", []),
+        ("xclip", ["-selection", "clipboard"]),
+        ("xsel", ["--clipboard", "--input"]),
+        ("pbcopy", []),
+    ]:
+        if shutil.which(tool):
+            try:
+                subprocess.run([tool] + args, input=text.encode("utf-8"), check=False, timeout=1.0)
+                success = True
+                break
+            except Exception:
+                pass
+
+    # 3. OSC 52 sequence (direct terminal clipboard)
+    try:
+        b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        if os.environ.get("TMUX"):
+            seq = f"\033Ptmux;\033\033]52;c;{b64}\a\033\\"
+        else:
+            seq = f"\033]52;c;{b64}\a"
+        sys.stdout.write(seq)
+        sys.stdout.flush()
+        success = True
+    except Exception:
+        pass
+
+    return success
+
+
+def clean_command_text(raw_cmd):
+    """Strip prompt markers, inline comments, and extraneous whitespace."""
+    cmd = raw_cmd.strip()
+    cmd = re.sub(r"^[$#%❯➜>»]\s*", "", cmd)
+    cmd = re.sub(r"\s+#.*$", "", cmd)
+    return cmd.strip()
+
+
+# ----------------------------------------------------------------------
+# Shell Aliases & Personal Sheets Discovery
+# ----------------------------------------------------------------------
+
+def strip_outer_quotes(s):
+    """Strip matching single or double outer quotes without touching inner quotes."""
+    s = s.strip()
+    if len(s) >= 2:
+        if (s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'"):
+            return s[1:-1]
+    return s
+
+
+def parse_explicit_zshrc_aliases():
+    """Extract explicit alias definitions declared directly in user's Zsh configs."""
+    explicit_aliases = []
+    seen = set()
+
+    zdotdir = os.environ.get("ZDOTDIR", os.path.expanduser("~"))
+    candidates = [
+        os.path.join(zdotdir, ".zshrc"),
+        os.path.expanduser("~/.zshrc"),
+        os.path.expanduser("~/.zsh_aliases"),
+    ]
+    unique_candidates = []
+    seen_paths = set()
+    for c in candidates:
+        if os.path.isfile(c):
+            rp = os.path.realpath(c)
+            if rp not in seen_paths:
+                seen_paths.add(rp)
+                unique_candidates.append(c)
+
+    for path in unique_candidates:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line_clean = line.strip()
+                    if not line_clean or line_clean.startswith("#"):
+                        continue
+                    m = re.match(r"^alias\s+([^=\s]+)=(.*)$", line_clean)
+                    if m:
+                        name = m.group(1).strip()
+                        raw_val = m.group(2).strip()
+                        val = strip_outer_quotes(raw_val)
+                        if name and name not in seen:
+                            seen.add(name)
+                            explicit_aliases.append({
+                                "name": name,
+                                "cmd": val,
+                                "source": ".zshrc",
+                                "is_explicit": True,
+                            })
+        except Exception:
+            pass
+
+    return explicit_aliases
+
+
+def get_user_aliases():
+    """Discover shell aliases, prioritizing explicit .zshrc aliases first.
+
+    Returns:
+        tuple: (explicit_aliases, all_aliases)
+            - explicit_aliases: sorted list of aliases declared directly in .zshrc
+            - all_aliases: combined list with explicit aliases first, then other shell/plugin aliases
+    """
+    explicit_aliases = parse_explicit_zshrc_aliases()
+    explicit_names = {a["name"] for a in explicit_aliases}
+
+    other_aliases = {}
+
+    # 1. Shell discovery (zsh / bash)
+    for shell in ["zsh", "bash"]:
+        if shutil.which(shell):
+            try:
+                cmd = f"source ~/.{shell}rc 2>/dev/null || true; alias"
+                proc = subprocess.run([shell, "-c", cmd], capture_output=True, text=True, timeout=1.5)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    for line in proc.stdout.splitlines():
+                        line = line.strip()
+                        if "=" in line:
+                            name, val = line.split("=", 1)
+                            name = name.strip()
+                            val = strip_outer_quotes(val)
+                            if name and not name.startswith("_") and name not in explicit_names:
+                                other_aliases[name] = val
+                    if other_aliases:
+                        break
+            except Exception:
+                pass
+
+    # 2. File parser fallback for other shell files (e.g., ~/.bashrc, ~/.bash_aliases)
+    other_candidates = [
+        os.path.expanduser("~/.bashrc"),
+        os.path.expanduser("~/.bash_aliases"),
+    ]
+    for path in other_candidates:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("alias ") and "=" in line:
+                            rest = line[6:].strip()
+                            n, v = rest.split("=", 1)
+                            n = n.strip()
+                            v = strip_outer_quotes(v)
+                            if n and n not in explicit_names and n not in other_aliases:
+                                other_aliases[n] = v
+            except Exception:
+                pass
+
+    sorted_explicit = sorted(explicit_aliases, key=lambda x: x["name"])
+    sorted_other = sorted([
+        {"name": k, "cmd": v, "source": "shell", "is_explicit": False}
+        for k, v in other_aliases.items()
+    ], key=lambda x: x["name"])
+
+    return sorted_explicit, sorted_explicit + sorted_other
+
+
+def list_personal_sheets():
+    """Discover all personal sheets across configured directories with descriptions."""
+    sheets = {}
+    for base_dir in PERSONAL_SHEETS_DIRS:
+        if not os.path.isdir(base_dir):
+            continue
+        try:
+            entries = sorted(os.listdir(base_dir))
+        except Exception:
+            continue
+        for entry in entries:
+            if entry.startswith(".") or entry.endswith("~") or entry.endswith(".bak"):
+                continue
+            path = os.path.join(base_dir, entry)
+            if not os.path.isfile(path):
+                continue
+
+            name, ext = os.path.splitext(entry)
+            if ext.lower() not in ("", ".txt", ".md", ".sh"):
+                continue
+
+            cmd_name = name.replace("_", " ")
+            if cmd_name in sheets:
+                continue
+
+            # Read first non-empty comment or title as summary
+            summary = ""
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        if line_str.startswith("#"):
+                            summary = re.sub(r"^[#=\-\s]+", "", line_str).strip()
+                            if summary:
+                                break
+                        elif not summary:
+                            summary = line_str
+                            break
+            except Exception:
+                pass
+
+            sheets[cmd_name] = {
+                "name": cmd_name,
+                "file": entry,
+                "path": path,
+                "summary": summary or f"Personal cheatsheet for {cmd_name}",
+            }
+
+    return sorted(sheets.values(), key=lambda x: x["name"])
+
+
+def load_personal_sheet(query):
+    """Check user's personal cheatsheets directory."""
+    q = query.strip().lower()
+    variations = [
+        q,
+        q + ".txt",
+        q + ".md",
+        q.replace(" ", "-") + ".txt",
+        q.replace(" ", "-") + ".md",
+        q.replace(" ", "_") + ".txt",
+    ]
+    for base_dir in PERSONAL_SHEETS_DIRS:
+        if not os.path.isdir(base_dir):
+            continue
+        for var in variations:
+            path = os.path.join(base_dir, var)
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        lines = [l.rstrip("\r\n") for l in f]
+                        if lines:
+                            return lines, f"personal ({os.path.basename(path)})"
+                except Exception:
+                    pass
+    return None, None
+
+
+# ----------------------------------------------------------------------
+# Caching & Documentation Sources
+# ----------------------------------------------------------------------
+
+def get_cache_path(query):
+    """Return local cache file path for given query."""
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", query.strip().lower())
+    return os.path.join(CACHE_DIR, f"{safe_name}.txt")
+
+
+def load_from_cache(query):
+    """Load cached documentation lines if available."""
+    path = get_cache_path(query)
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                lines = [l.rstrip("\r\n") for l in f]
+                if lines:
+                    return lines
+        except Exception:
+            pass
+    return None
+
+
+def save_to_cache(query, lines):
+    """Save documentation lines to local cache."""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        path = get_cache_path(query)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
+def fetch_cheat_sh_online(query):
+    """Fetch documentation directly from cheat.sh online service."""
+    target = query.strip().replace(" ", "/")
+    url = f"https://cheat.sh/{target}?m"
+
+    raw = None
+    if shutil.which("curl"):
+        try:
+            proc = subprocess.run(
+                ["curl", "-s", "-m", "3", "--connect-timeout", "2", url],
+                capture_output=True,
+                text=True,
+                timeout=3.5,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                raw = proc.stdout
+        except Exception:
+            pass
+
+    if raw is None:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/7.88.1"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                if resp.status == 200:
+                    raw = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+
+    if raw:
+        cleaned = strip_ansi(raw)
+        if not re.search(r"(Unknown topic|404 NOT FOUND|<html>|<!DOCTYPE)", cleaned, re.IGNORECASE):
+            lines = [l.rstrip("\r\n") for l in cleaned.splitlines()]
+            if lines:
+                return lines
+    return None
+
+
+def fetch_man_page(query):
+    """Fetch local system manual page."""
+    candidates = [query.strip().replace(" ", "-"), query.strip().split()[0]]
+    for cand in candidates:
+        try:
+            check = subprocess.run(["man", "-w", cand], capture_output=True, text=True, timeout=1.5)
+            if check.returncode == 0:
+                proc = subprocess.run(["man", cand], capture_output=True, text=True, timeout=3.0)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    cleaned = strip_ansi(proc.stdout)
+                    return [f"# Manual page for {cand}", ""] + [l.rstrip("\r\n") for l in cleaned.splitlines()]
+        except Exception:
+            pass
+    return None
+
+
+def fetch_cmd_help(query):
+    """Fetch command help output using --help."""
+    base_cmd = query.strip().split()[0]
+    try:
+        proc = subprocess.run([base_cmd, "--help"], capture_output=True, text=True, timeout=2.0)
+        out = proc.stdout or proc.stderr
+        if out and out.strip():
+            cleaned = strip_ansi(out)
+            return [f"# Help output for {base_cmd} --help", ""] + [l.rstrip("\r\n") for l in cleaned.splitlines()]
+    except Exception:
+        pass
+    return None
+
+
+def discover_sources(query, force_refresh=False):
+    """
+    Discover all available sources for query.
+    Avoids blocking network requests if a personal sheet is found.
+    Returns ordered dict: { source_key: (lines, badge_label) }
+    """
+    query = query.strip()
+    sources = {}
+
+    # 1. Personal sheets (highest priority)
+    p_lines, p_label = load_personal_sheet(query)
+    if p_lines:
+        sources["personal"] = (p_lines, p_label)
+
+    # 2. Cheat.sh (online / cache)
+    cached = load_from_cache(query) if not force_refresh else None
+    if cached and not force_refresh:
+        sources["cheat.sh"] = (cached, "cheat.sh [cached]")
+    elif not p_lines or force_refresh:
+        online = fetch_cheat_sh_online(query)
+        if online:
+            save_to_cache(query, online)
+            sources["cheat.sh"] = (online, "cheat.sh")
+        elif cached:
+            sources["cheat.sh"] = (cached, "cheat.sh [cached]")
+
+    # 3. Man page
+    man = fetch_man_page(query)
+    if man:
+        sources["man"] = (man, "man")
+
+    # 4. Command --help
+    cmd_help = fetch_cmd_help(query)
+    if cmd_help:
+        sources["--help"] = (cmd_help, "--help")
+
+    return sources
+
+
+# ----------------------------------------------------------------------
+# Tokenizer & Smart Word Wrapping
+# ----------------------------------------------------------------------
+
+def parse_line_tokens(line):
+    """
+    Parse a single raw line into token tuples: (token_text, token_type)
+    and categorize line_type: 'empty', 'comment', 'header', 'command'.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return [(line, "text")], "empty"
+
+    if stripped.startswith("#") or stripped.startswith("//"):
+        return [(line, "comment")], "comment"
+
+    if HEADER_RE.match(stripped) or (len(stripped) > 2 and stripped.isupper() and ":" in stripped):
+        return [(line, "header")], "header"
+
+    if stripped.startswith("cheat:") or stripped.startswith("cheat.sheets:"):
+        return [(line, "header")], "header"
+
+    tokens = []
+    parts = re.split(r"(\s+)", line)
+    is_first = True
+
+    for p in parts:
+        if not p:
+            continue
+        if p.isspace():
+            tokens.append((p, "text"))
+        elif is_first:
+            tokens.append((p, "command"))
+            is_first = False
+        elif p.startswith("-"):
+            tokens.append((p, "flag"))
+        elif (p.startswith("<") and p.endswith(">")) or (p.startswith("[") and p.endswith("]")):
+            tokens.append((p, "param"))
+        elif "=" in p and p.startswith("--"):
+            flag_part, val_part = p.split("=", 1)
+            tokens.append((flag_part + "=", "flag"))
+            tokens.append((val_part, "param"))
+        else:
+            tokens.append((p, "arg"))
+
+    return tokens, "command"
+
+
+def wrap_line_tokens(tokens, max_width, indent="    "):
+    """
+    Wrap tokens at word boundaries to fit within max_width.
+    Continuation lines are prepended with indent.
+    """
+    if max_width <= 10:
+        max_width = 10
+
+    wrapped_lines = []
+    current_tokens = []
+    current_len = 0
+
+    for text, token_type in tokens:
+        if current_len + len(text) <= max_width:
+            current_tokens.append((text, token_type))
+            current_len += len(text)
+        else:
+            if any(not t[0].isspace() for t in current_tokens):
+                wrapped_lines.append(current_tokens)
+                current_tokens = []
+                current_len = 0
+                if indent:
+                    current_tokens.append((indent, "text"))
+                    current_len = len(indent)
+
+            rem_text = text
+            while len(rem_text) > (max_width - current_len):
+                space = max(1, max_width - current_len)
+                chunk = rem_text[:space]
+                rem_text = rem_text[space:]
+                current_tokens.append((chunk, token_type))
+                current_len += len(chunk)
+                if rem_text:
+                    wrapped_lines.append(current_tokens)
+                    current_tokens = []
+                    current_len = 0
+                    if indent:
+                        current_tokens.append((indent, "text"))
+                        current_len = len(indent)
+
+            if rem_text and not (current_len == len(indent) and rem_text.isspace()):
+                current_tokens.append((rem_text, token_type))
+                current_len += len(rem_text)
+
+    if current_tokens and any(not t[0].isspace() for t in current_tokens):
+        wrapped_lines.append(current_tokens)
+
+    return wrapped_lines if wrapped_lines else [[("", "text")]]
+
+
+class DisplayLine:
+    """Represents a rendered line in the TUI."""
+    def __init__(self, tokens, line_type, cmd_id=None, is_continuation=False, raw_cmd=""):
+        self.tokens = tokens
+        self.line_type = line_type
+        self.cmd_id = cmd_id
+        self.is_continuation = is_continuation
+        self.raw_cmd = raw_cmd
+        self.plain_text = "".join(t[0] for t in tokens)
+
+
+# ----------------------------------------------------------------------
+# Curses Interactive TUI
+# ----------------------------------------------------------------------
+
+class CheatsheetTUI:
+    """Feature-packed interactive cheatsheet viewer."""
+
+    def __init__(self, initial_query="", tmux_target=None):
+        self.query = initial_query.strip()
+        self.tmux_target = tmux_target or os.environ.get("CHEAT_SHEET_TARGET_PANE")
+        self.history = [self.query] if self.query else []
+        self.history_idx = 0 if self.query else -1
+
+        # Sources state
+        self.sources = {}
+        self.source_keys = []
+        self.current_source_idx = 0
+        self.raw_lines = []
+        self.source_badge = ""
+
+        # Display layout state
+        self.display_lines = []
+        self.selectable_commands = []  # [{cmd_id, clean_cmd, display_idx, line_count}]
+        self.selected_cmd_idx = -1
+        self.scroll_y = 0
+        self.last_width = 0
+
+        # In-document search state
+        self.search_query = ""
+        self.search_matches = []  # [(display_idx, start_col, end_col, match_idx)]
+        self.search_match_idx = -1
+
+        # Status & feedback
+        self.flash_message = ""
+        self.flash_until = 0.0
+
+    def set_flash(self, message, duration=2.0):
+        """Show temporary status message in footer."""
+        self.flash_message = message
+        self.flash_until = time.time() + duration
+
+    def load_welcome_page(self):
+        """Display a succinct, actionable introductory guide to cheat-sheet."""
+        self.query = "guide"
+        self.source_badge = "welcome"
+        self.sources = {"welcome": ([], "welcome")}
+        self.source_keys = ["welcome"]
+        self.current_source_idx = 0
+        self.scroll_y = 0
+        self.selected_cmd_idx = -1
+        self.search_query = ""
+        self.search_matches = []
+        self.search_match_idx = -1
+
+        self.raw_lines = [
+            "# ==============================================================================",
+            "# CHEAT-SHEET - Interactive Terminal Documentation & Command Launcher",
+            "# ==============================================================================",
+            "",
+            "# Fast Navigation & Keybindings:",
+            "#   [/] Search text in page       [n] / [N] Next / prev search match",
+            "#   [s] Search new command        [c] Browse personal sheets (~/.cheat-sheet/)",
+            "#   [a] Browse & paste aliases    [t] Cycle sources (cheat.sh, man, --help)",
+            "#   [[] / []] History back/fwd    [r] Force reload from online source",
+            "#   [q] / [Ctrl+C] Exit           [Esc] Clear selection & search",
+            "",
+            "# Interactive Command Selection & Terminal Injection:",
+            "#   Press [Tab] or [Shift+Tab] to highlight any command example below.",
+            "#   Press [Enter] to inject the selected command directly into your terminal prompt!",
+            "#   Press [y] to copy the command to your clipboard.",
+            "",
+            "# Example: Look up archiving with tar (press Tab then Enter to test!):",
+            "tar -czvf backup.tar.gz /path/to/directory",
+            "",
+            "# Example: Find large files modified recently:",
+            "find . -type f -size +50M -mtime -7",
+            "",
+            "# Example: Create personal cheatsheets in ~/.cheat-sheet/sheets/:",
+            "mkdir -p ~/.cheat-sheet/sheets && touch ~/.cheat-sheet/sheets/my-tool.txt",
+            "",
+            "# Example: Browse your shell aliases (or press 'a' now):",
+            "cheat-sheet --help",
+            "",
+            "# Tips:",
+            "# - In Tmux, press prefix + / to toggle this panel instantly alongside your work.",
+            "# - In Zsh, press Alt + / on any command you are typing to inspect its cheat sheet.",
+        ]
+        self.prepare_display_lines(max(20, self.last_width or 80))
+
+    def load_query(self, query, force_refresh=False, direct_path=None):
+        """Fetch sources and load content for query with zero delay on personal sheets."""
+        self.query = query.strip()
+        self.scroll_y = 0
+        self.selected_cmd_idx = -1
+        self.search_query = ""
+        self.search_matches = []
+        self.search_match_idx = -1
+
+        if not self.query and not direct_path:
+            self.load_welcome_page()
+            return
+
+        if self.query.lower() in ("guide", "help", "intro", "--help-interactive"):
+            self.load_welcome_page()
+            return
+
+        # Fast path 1: direct file path provided (from customs menu)
+        if direct_path and os.path.isfile(direct_path):
+            try:
+                with open(direct_path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = [l.rstrip("\r\n") for l in f]
+                if lines:
+                    base_file = os.path.basename(direct_path)
+                    self.sources = {"personal": (lines, f"personal ({base_file})")}
+                    self.source_keys = ["personal"]
+                    self.current_source_idx = 0
+                    self.raw_lines = lines
+                    self.source_badge = f"personal ({base_file})"
+                    self.prepare_display_lines(max(20, self.last_width or 80))
+                    return
+            except Exception:
+                pass
+
+        # Fast path 2: check personal sheet first (zero network lag)
+        p_lines, p_label = load_personal_sheet(self.query)
+        if p_lines and not force_refresh:
+            self.sources = {"personal": (p_lines, p_label)}
+            cached = load_from_cache(self.query)
+            if cached:
+                self.sources["cheat.sh"] = (cached, "cheat.sh [cached]")
+            man = fetch_man_page(self.query)
+            if man:
+                self.sources["man"] = (man, "man")
+            cmd_help = fetch_cmd_help(self.query)
+            if cmd_help:
+                self.sources["--help"] = (cmd_help, "--help")
+
+            self.source_keys = list(self.sources.keys())
+            self.current_source_idx = 0
+            self.raw_lines = p_lines
+            self.source_badge = p_label
+            self.prepare_display_lines(max(20, self.last_width or 80))
+            return
+
+        # General path: online cheat.sh / cache / man / --help
+        self.sources = discover_sources(self.query, force_refresh=force_refresh)
+        self.source_keys = list(self.sources.keys())
+
+        if self.source_keys:
+            self.current_source_idx = 0
+            lines, badge = self.sources[self.source_keys[0]]
+            self.raw_lines = lines
+            self.source_badge = badge
+        else:
+            self.raw_lines = [
+                "",
+                f"  No documentation found for '{self.query}'.",
+                "",
+                "  Tips:",
+                "  - Check for typos in the command name.",
+                "  - Press [s] to search another command (e.g. tar, git commit, find).",
+                "  - Press [c] to view your personal cheatsheets in ~/.cheat-sheet/sheets/.",
+                "  - Press [a] to view your shell aliases (.zshrc explicit aliases shown first).",
+                "  - Press [q] to exit.",
+            ]
+            self.source_badge = "not found"
+
+        self.prepare_display_lines(max(20, self.last_width or 80))
+
+    def cycle_source(self):
+        """Cycle to next available documentation source."""
+        if len(self.source_keys) <= 1:
+            self.set_flash(" Only 1 source available for this command ")
+            return
+
+        self.current_source_idx = (self.current_source_idx + 1) % len(self.source_keys)
+        k = self.source_keys[self.current_source_idx]
+        lines, badge = self.sources[k]
+        self.raw_lines = lines
+        self.source_badge = badge
+        self.scroll_y = 0
+        self.selected_cmd_idx = -1
+        self.search_query = ""
+        self.search_matches = []
+        self.search_match_idx = -1
+        self.prepare_display_lines(max(20, self.last_width or 80))
+        self.set_flash(f" Switched to {badge} ")
+
+    def prepare_display_lines(self, width):
+        """Wrap raw lines to fit display width and detect selectable commands."""
+        self.last_width = width
+        wrap_w = max(15, width - 4)  # Leave 2 cols for gutter, 2 for margin
+
+        self.display_lines = []
+        self.selectable_commands = []
+        next_cmd_id = 0
+
+        for raw_line in self.raw_lines:
+            tokens, line_type = parse_line_tokens(raw_line)
+
+            if line_type == "empty":
+                self.display_lines.append(DisplayLine([("", "text")], "empty"))
+                continue
+
+            if line_type == "command":
+                clean_cmd = clean_command_text(raw_line)
+                wrapped_tokens = wrap_line_tokens(tokens, wrap_w, indent="    ")
+                cmd_id = next_cmd_id
+                next_cmd_id += 1
+
+                first_idx = len(self.display_lines)
+                for i, w_toks in enumerate(wrapped_tokens):
+                    is_cont = (i > 0)
+                    self.display_lines.append(
+                        DisplayLine(w_toks, "command", cmd_id=cmd_id, is_continuation=is_cont, raw_cmd=clean_cmd)
+                    )
+
+                self.selectable_commands.append({
+                    "cmd_id": cmd_id,
+                    "clean_cmd": clean_cmd,
+                    "first_display_line": first_idx,
+                    "line_count": len(wrapped_tokens),
+                })
+            elif line_type == "comment":
+                wrapped_tokens = wrap_line_tokens(tokens, wrap_w, indent="#   ")
+                for w_toks in wrapped_tokens:
+                    self.display_lines.append(DisplayLine(w_toks, "comment"))
+            elif line_type == "header":
+                wrapped_tokens = wrap_line_tokens(tokens, wrap_w, indent="  ")
+                for w_toks in wrapped_tokens:
+                    self.display_lines.append(DisplayLine(w_toks, "header"))
+            else:
+                wrapped_tokens = wrap_line_tokens(tokens, wrap_w, indent="  ")
+                for w_toks in wrapped_tokens:
+                    self.display_lines.append(DisplayLine(w_toks, "text"))
+
+    def navigate_command(self, forward=True):
+        """Select next/previous executable command with Tab / Shift+Tab."""
+        if not self.selectable_commands:
+            self.set_flash(" No command examples in document ")
+            return
+
+        total = len(self.selectable_commands)
+        if self.selected_cmd_idx == -1:
+            visible_idx = 0
+            for i, cmd in enumerate(self.selectable_commands):
+                if cmd["first_display_line"] >= self.scroll_y:
+                    visible_idx = i
+                    break
+            self.selected_cmd_idx = visible_idx
+        else:
+            delta = 1 if forward else -1
+            self.selected_cmd_idx = (self.selected_cmd_idx + delta) % total
+
+        cmd = self.selectable_commands[self.selected_cmd_idx]
+        target_line = cmd["first_display_line"]
+
+        content_height = max(1, curses.LINES - 2)
+        if target_line < self.scroll_y or target_line >= self.scroll_y + content_height - 1:
+            self.scroll_y = max(0, target_line - 2)
+
+    def get_active_command_text(self):
+        """Return clean text of selected command or first visible command."""
+        if self.selected_cmd_idx != -1 and self.selected_cmd_idx < len(self.selectable_commands):
+            return self.selectable_commands[self.selected_cmd_idx]["clean_cmd"]
+
+        content_height = max(1, curses.LINES - 2)
+        for idx in range(self.scroll_y, min(len(self.display_lines), self.scroll_y + content_height)):
+            dline = self.display_lines[idx]
+            if dline.line_type == "command" and dline.raw_cmd:
+                return dline.raw_cmd
+
+        return ""
+
+    def sync_command_selection_with_line(self, line_idx):
+        """If line_idx belongs to or describes a command, update selected_cmd_idx to it."""
+        if line_idx < 0 or line_idx >= len(self.display_lines):
+            return
+
+        dline = self.display_lines[line_idx]
+
+        # 1. Match is directly on a command line
+        if dline.cmd_id is not None:
+            for i, cmd in enumerate(self.selectable_commands):
+                if cmd["cmd_id"] == dline.cmd_id:
+                    self.selected_cmd_idx = i
+                    return
+
+        # 2. Match is on a comment preceding a command: look ahead up to 3 lines
+        if dline.line_type == "comment":
+            for offset in range(1, 4):
+                next_idx = line_idx + offset
+                if next_idx < len(self.display_lines):
+                    next_dline = self.display_lines[next_idx]
+                    if next_dline.cmd_id is not None:
+                        for i, cmd in enumerate(self.selectable_commands):
+                            if cmd["cmd_id"] == next_dline.cmd_id:
+                                self.selected_cmd_idx = i
+                                return
+                    elif next_dline.line_type not in ("comment", "empty"):
+                        break
+
+    def perform_search(self, term):
+        """Search text in current document and index matches."""
+        self.search_query = term.strip()
+        self.search_matches = []
+        self.search_match_idx = -1
+
+        if not self.search_query:
+            return
+
+        q_lower = self.search_query.lower()
+        match_counter = 0
+        for line_idx, dline in enumerate(self.display_lines):
+            text_lower = dline.plain_text.lower()
+            start = 0
+            while True:
+                pos = text_lower.find(q_lower, start)
+                if pos == -1:
+                    break
+                self.search_matches.append((line_idx, pos, pos + len(q_lower), match_counter))
+                match_counter += 1
+                start = pos + len(q_lower)
+
+        if self.search_matches:
+            self.search_match_idx = 0
+            target_line = self.search_matches[0][0]
+            content_height = max(1, curses.LINES - 2)
+            self.scroll_y = max(0, target_line - content_height // 2)
+            self.sync_command_selection_with_line(target_line)
+            self.set_flash(f" Match 1 of {len(self.search_matches)} ")
+        else:
+            self.set_flash(f" Pattern not found: {self.search_query} ")
+
+    def next_search_match(self, forward=True):
+        """Jump to next/previous search occurrence with active highlight and command sync."""
+        if not self.search_matches:
+            return
+        delta = 1 if forward else -1
+        self.search_match_idx = (self.search_match_idx + delta) % len(self.search_matches)
+        target_line = self.search_matches[self.search_match_idx][0]
+        content_height = max(1, curses.LINES - 2)
+        self.scroll_y = max(0, target_line - content_height // 2)
+        self.sync_command_selection_with_line(target_line)
+        self.set_flash(f" Match {self.search_match_idx + 1} of {len(self.search_matches)} ")
+
+    def show_customs_menu(self, stdscr):
+        """Display an interactive fuzzy/filtered menu of personal cheatsheets with instant loading."""
+        sheets = list_personal_sheets()
+        if not sheets:
+            self.set_flash(" No personal sheets in ~/.cheat-sheet/sheets/ ")
+            return
+
+        selected_idx = 0
+        filter_str = ""
+        scroll_offset = 0
+
+        while True:
+            max_y, max_x = stdscr.getmaxyx()
+            stdscr.erase()
+
+            filtered = []
+            f_lower = filter_str.lower()
+            for s in sheets:
+                if not filter_str or f_lower in s["name"].lower() or f_lower in s["summary"].lower():
+                    filtered.append(s)
+
+            if selected_idx >= len(filtered):
+                selected_idx = max(0, len(filtered) - 1)
+
+            # 1. Header Bar
+            header_title = f" PERSONAL CHEATSHEETS ({len(filtered)}/{len(sheets)}) "
+            nav_hint = " [Enter] Open  [Esc] Back "
+            fill = max(0, max_x - 1 - len(header_title) - len(nav_hint) - 6)
+            header_bar = f"───{header_title}" + ("─" * fill) + f"{nav_hint}───"
+            header_bar = header_bar[:max_x - 1]
+
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.MENU_HEADER) | curses.A_BOLD)
+                stdscr.addstr(0, 0, header_bar)
+                stdscr.attroff(curses.color_pair(ColorPairs.MENU_HEADER) | curses.A_BOLD)
+            except curses.error:
+                pass
+
+            # 2. Search / Filter Input Row
+            filter_prompt = f" Filter: {filter_str}█"[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.MENU_PROMPT) | curses.A_BOLD)
+                stdscr.addstr(1, 0, " " * (max_x - 1))
+                stdscr.addstr(1, 0, filter_prompt)
+                stdscr.attroff(curses.color_pair(ColorPairs.MENU_PROMPT) | curses.A_BOLD)
+            except curses.error:
+                pass
+
+            # 3. Content List
+            list_start_y = 3
+            available_rows = max_y - 4
+            is_compact = (max_x < 65)
+            rows_per_item = 2 if is_compact else 1
+            visible_items_count = max(1, available_rows // rows_per_item)
+
+            if selected_idx < scroll_offset:
+                scroll_offset = selected_idx
+            elif selected_idx >= scroll_offset + visible_items_count:
+                scroll_offset = selected_idx - visible_items_count + 1
+
+            row_y = list_start_y
+            for i in range(scroll_offset, min(len(filtered), scroll_offset + visible_items_count)):
+                item = filtered[i]
+                is_curr = (i == selected_idx)
+
+                gutter = " ▶ " if is_curr else "   "
+                name_part = item["name"]
+                summary_part = item["summary"]
+
+                if not is_compact:
+                    avail_summary = max(0, max_x - 1 - (len(gutter) + 24))
+                    try:
+                        if is_curr:
+                            stdscr.attron(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD | curses.A_REVERSE)
+                            stdscr.addstr(row_y, 0, " " * (max_x - 1))
+                            stdscr.addstr(row_y, 0, f"{gutter}{name_part:<22} {summary_part}"[:max_x - 1])
+                            stdscr.attroff(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD | curses.A_REVERSE)
+                        else:
+                            stdscr.attron(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD)
+                            stdscr.addstr(row_y, 0, gutter + f"{name_part:<22} ")
+                            stdscr.attroff(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD)
+
+                            stdscr.attron(curses.color_pair(ColorPairs.MENU_DESC) | curses.A_DIM)
+                            stdscr.addstr(row_y, len(gutter) + 23, summary_part[:avail_summary])
+                            stdscr.attroff(curses.color_pair(ColorPairs.MENU_DESC) | curses.A_DIM)
+                    except curses.error:
+                        pass
+                    row_y += 1
+                else:
+                    line1 = f"{gutter}{name_part}"[:max_x - 1]
+                    line2 = f"     {summary_part}"[:max_x - 1]
+                    try:
+                        if is_curr:
+                            stdscr.attron(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD)
+                            stdscr.addstr(row_y, 0, line1)
+                            stdscr.attroff(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD)
+                            stdscr.attron(curses.color_pair(ColorPairs.MENU_PROMPT))
+                            stdscr.addstr(row_y + 1, 0, line2)
+                            stdscr.attroff(curses.color_pair(ColorPairs.MENU_PROMPT))
+                        else:
+                            stdscr.addstr(row_y, 0, line1)
+                            stdscr.attron(curses.color_pair(ColorPairs.MENU_DESC) | curses.A_DIM)
+                            stdscr.addstr(row_y + 1, 0, line2)
+                            stdscr.attroff(curses.color_pair(ColorPairs.MENU_DESC) | curses.A_DIM)
+                    except curses.error:
+                        pass
+                    row_y += 2
+
+            # 4. Footer Bar
+            footer = " [↑/↓/j/k] Move  •  [Enter] Open  •  Type to filter  •  [Esc] Back "[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.MENU_FOOTER) | curses.A_DIM)
+                stdscr.addstr(max_y - 1, 0, footer)
+                stdscr.attroff(curses.color_pair(ColorPairs.MENU_FOOTER) | curses.A_DIM)
+            except curses.error:
+                pass
+
+            stdscr.refresh()
+
+            try:
+                ch = stdscr.getch()
+            except KeyboardInterrupt:
+                break
+
+            if ch in (27, 3):  # Esc or Ctrl+C
+                return
+            elif ch in (curses.KEY_ENTER, 10, 13):
+                if filtered and 0 <= selected_idx < len(filtered):
+                    picked_cmd = filtered[selected_idx]["name"]
+                    picked_path = filtered[selected_idx].get("path")
+                    self.history = self.history[:self.history_idx + 1]
+                    self.history.append(picked_cmd)
+                    self.history_idx = len(self.history) - 1
+                    self.load_query(picked_cmd, direct_path=picked_path)
+                    self.set_flash(f" Loaded personal sheet: {picked_cmd} ")
+                return
+            elif ch in (curses.KEY_UP, ord('k'), ord('K')):
+                if selected_idx > 0:
+                    selected_idx -= 1
+            elif ch in (curses.KEY_DOWN, ord('j'), ord('J')):
+                if selected_idx < len(filtered) - 1:
+                    selected_idx += 1
+            elif ch == curses.KEY_MOUSE:
+                try:
+                    _, _, _, _, bstate = curses.getmouse()
+                    wheel_up = getattr(curses, "BUTTON4_PRESSED", 0x10000) | 0x10000
+                    wheel_down = getattr(curses, "BUTTON5_PRESSED", 0x200000) | 0x200000
+                    if bstate & wheel_up:
+                        if selected_idx > 0:
+                            selected_idx -= 1
+                    elif bstate & wheel_down:
+                        if selected_idx < len(filtered) - 1:
+                            selected_idx += 1
+                except curses.error:
+                    pass
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if filter_str:
+                    filter_str = filter_str[:-1]
+                    selected_idx = 0
+            elif 32 <= ch <= 126:
+                filter_str += chr(ch)
+                selected_idx = 0
+
+    def show_aliases_menu(self, stdscr):
+        """Display an interactive fuzzy/filtered menu of current shell aliases."""
+        explicit_aliases, all_aliases = get_user_aliases()
+        if not explicit_aliases and not all_aliases:
+            self.set_flash(" No aliases found in shell ")
+            return
+
+        view_mode = "zshrc" if explicit_aliases else "all"
+        selected_idx = 0
+        filter_str = ""
+        scroll_offset = 0
+
+        while True:
+            max_y, max_x = stdscr.getmaxyx()
+            stdscr.erase()
+
+            current_pool = explicit_aliases if view_mode == "zshrc" else all_aliases
+            filtered = []
+            f_lower = filter_str.lower()
+            for a in current_pool:
+                if not filter_str or f_lower in a["name"].lower() or f_lower in a["cmd"].lower():
+                    filtered.append(a)
+
+            if selected_idx >= len(filtered):
+                selected_idx = max(0, len(filtered) - 1)
+
+            # 1. Header Bar
+            if view_mode == "zshrc":
+                header_title = f" ALIASES (.zshrc: {len(filtered)}/{len(explicit_aliases)}) "
+                nav_hint = f" [Tab] All Aliases ({len(all_aliases)})  [Enter] Paste  [y] Copy  [Esc] Back "
+            else:
+                header_title = f" ALL ALIASES ({len(filtered)}/{len(all_aliases)}) "
+                nav_hint = f" [Tab] .zshrc only ({len(explicit_aliases)})  [Enter] Paste  [y] Copy  [Esc] Back "
+
+            fill = max(0, max_x - 1 - len(header_title) - len(nav_hint) - 6)
+            header_bar = f"───{header_title}" + ("─" * fill) + f"{nav_hint}───"
+            header_bar = header_bar[:max_x - 1]
+
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.MENU_HEADER) | curses.A_BOLD)
+                stdscr.addstr(0, 0, header_bar)
+                stdscr.attroff(curses.color_pair(ColorPairs.MENU_HEADER) | curses.A_BOLD)
+            except curses.error:
+                pass
+
+            # 2. Search / Filter Input Row
+            filter_prompt = f" Filter ({view_mode}): {filter_str}█"[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.MENU_PROMPT) | curses.A_BOLD)
+                stdscr.addstr(1, 0, " " * (max_x - 1))
+                stdscr.addstr(1, 0, filter_prompt)
+                stdscr.attroff(curses.color_pair(ColorPairs.MENU_PROMPT) | curses.A_BOLD)
+            except curses.error:
+                pass
+
+            # 3. Content List
+            list_start_y = 3
+            available_rows = max_y - 4
+            is_compact = (max_x < 70)
+            rows_per_item = 2 if is_compact else 1
+            visible_items_count = max(1, available_rows // rows_per_item)
+
+            if selected_idx < scroll_offset:
+                scroll_offset = selected_idx
+            elif selected_idx >= scroll_offset + visible_items_count:
+                scroll_offset = selected_idx - visible_items_count + 1
+
+            if not filtered:
+                empty_msg = (
+                    f"  No matching .zshrc aliases. Press [Tab] to search all {len(all_aliases)} shell aliases."
+                    if view_mode == "zshrc"
+                    else f"  No aliases matching '{filter_str}'."
+                )
+                try:
+                    stdscr.attron(curses.color_pair(ColorPairs.MENU_PROMPT))
+                    stdscr.addstr(list_start_y, 0, empty_msg[:max_x - 1])
+                    stdscr.attroff(curses.color_pair(ColorPairs.MENU_PROMPT))
+                except curses.error:
+                    pass
+            else:
+                row_y = list_start_y
+                for i in range(scroll_offset, min(len(filtered), scroll_offset + visible_items_count)):
+                    item = filtered[i]
+                    is_curr = (i == selected_idx)
+
+                    gutter = " ▶ " if is_curr else "   "
+                    name_part = item["name"]
+                    cmd_part = item["cmd"]
+                    badge = "[.zshrc]" if item.get("is_explicit") else "[shell] "
+
+                    if not is_compact:
+                        name_col_width = 16
+                        badge_col_width = 9
+                        prefix_len = len(gutter) + name_col_width + badge_col_width + 1
+                        avail_cmd = max(0, max_x - 1 - prefix_len)
+
+                        try:
+                            if is_curr:
+                                stdscr.attron(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD | curses.A_REVERSE)
+                                stdscr.addstr(row_y, 0, " " * (max_x - 1))
+                                line_content = f"{gutter}{name_part:<{name_col_width}} {badge:<{badge_col_width}} {cmd_part}"
+                                stdscr.addstr(row_y, 0, line_content[:max_x - 1])
+                                stdscr.attroff(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD | curses.A_REVERSE)
+                            else:
+                                stdscr.attron(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD)
+                                stdscr.addstr(row_y, 0, gutter + f"{name_part:<{name_col_width}} ")
+                                stdscr.attroff(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD)
+
+                                badge_pair = curses.color_pair(ColorPairs.MENU_BADGE_ZSHRC) if item.get("is_explicit") else (curses.color_pair(ColorPairs.MENU_BADGE_SHELL) | curses.A_DIM)
+                                stdscr.attron(badge_pair)
+                                stdscr.addstr(row_y, len(gutter) + name_col_width + 1, f"{badge:<{badge_col_width}} ")
+                                stdscr.attroff(badge_pair)
+
+                                stdscr.attron(curses.color_pair(ColorPairs.MENU_DESC) | curses.A_DIM)
+                                stdscr.addstr(row_y, prefix_len, cmd_part[:avail_cmd])
+                                stdscr.attroff(curses.color_pair(ColorPairs.MENU_DESC) | curses.A_DIM)
+                        except curses.error:
+                            pass
+                        row_y += 1
+                    else:
+                        line1 = f"{gutter}{name_part:<16} {badge}"[:max_x - 1]
+                        line2 = f"     {cmd_part}"[:max_x - 1]
+                        try:
+                            if is_curr:
+                                stdscr.attron(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD)
+                                stdscr.addstr(row_y, 0, line1)
+                                stdscr.attroff(curses.color_pair(ColorPairs.MENU_ITEM) | curses.A_BOLD)
+                                stdscr.attron(curses.color_pair(ColorPairs.MENU_PROMPT))
+                                stdscr.addstr(row_y + 1, 0, line2)
+                                stdscr.attroff(curses.color_pair(ColorPairs.MENU_PROMPT))
+                            else:
+                                stdscr.addstr(row_y, 0, line1)
+                                stdscr.attron(curses.color_pair(ColorPairs.MENU_DESC) | curses.A_DIM)
+                                stdscr.addstr(row_y + 1, 0, line2)
+                                stdscr.attroff(curses.color_pair(ColorPairs.MENU_DESC) | curses.A_DIM)
+                        except curses.error:
+                            pass
+                        row_y += 2
+
+            # 4. Footer Bar
+            footer = " [↑/↓/j/k] Move  •  [Tab] Toggle Source  •  [Enter] Paste  •  [y] Copy  •  [Esc] Back "[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.MENU_FOOTER) | curses.A_DIM)
+                stdscr.addstr(max_y - 1, 0, footer)
+                stdscr.attroff(curses.color_pair(ColorPairs.MENU_FOOTER) | curses.A_DIM)
+            except curses.error:
+                pass
+
+            stdscr.refresh()
+
+            try:
+                ch = stdscr.getch()
+            except KeyboardInterrupt:
+                break
+
+            if ch in (27, 3):  # Esc or Ctrl+C
+                return
+            elif ch in (ord('\t'), 9, getattr(curses, "KEY_BTAB", -1)):
+                view_mode = "all" if view_mode == "zshrc" else "zshrc"
+                selected_idx = 0
+                scroll_offset = 0
+            elif ch in (curses.KEY_ENTER, 10, 13):
+                if filtered and 0 <= selected_idx < len(filtered):
+                    target_alias = filtered[selected_idx]["name"]
+                    self.inject_or_exit(target_alias)
+                return
+            elif ch in (ord('y'),):
+                if filtered and 0 <= selected_idx < len(filtered):
+                    target_alias = filtered[selected_idx]["name"]
+                    copy_to_clipboard(target_alias)
+                    self.set_flash(f" ✓ Copied alias: {target_alias} ")
+                    return
+            elif ch in (ord('Y'),):
+                if filtered and 0 <= selected_idx < len(filtered):
+                    target_cmd = filtered[selected_idx]["cmd"]
+                    copy_to_clipboard(target_cmd)
+                    self.set_flash(f" ✓ Copied command: {target_cmd[:30]} ")
+                    return
+            elif ch in (curses.KEY_UP, ord('k'), ord('K')):
+                if selected_idx > 0:
+                    selected_idx -= 1
+            elif ch in (curses.KEY_DOWN, ord('j'), ord('J')):
+                if selected_idx < len(filtered) - 1:
+                    selected_idx += 1
+            elif ch == curses.KEY_MOUSE:
+                try:
+                    _, _, _, _, bstate = curses.getmouse()
+                    wheel_up = getattr(curses, "BUTTON4_PRESSED", 0x10000) | 0x10000
+                    wheel_down = getattr(curses, "BUTTON5_PRESSED", 0x200000) | 0x200000
+                    if bstate & wheel_up:
+                        if selected_idx > 0:
+                            selected_idx -= 1
+                    elif bstate & wheel_down:
+                        if selected_idx < len(filtered) - 1:
+                            selected_idx += 1
+                except curses.error:
+                    pass
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if filter_str:
+                    filter_str = filter_str[:-1]
+                    selected_idx = 0
+            elif 32 <= ch <= 126:
+                filter_str += chr(ch)
+                selected_idx = 0
+
+    def inject_or_exit(self, cmd_text):
+        """Inject command into target terminal pane or copy and exit."""
+        if not cmd_text:
+            self.set_flash(" No command selected to inject ")
+            return
+
+        if self.tmux_target and os.environ.get("TMUX"):
+            try:
+                subprocess.run(["tmux", "send-keys", "-t", self.tmux_target, "-l", cmd_text], check=False)
+                subprocess.run(["tmux", "kill-pane"], check=False)
+                sys.exit(0)
+            except Exception:
+                pass
+
+        copy_to_clipboard(cmd_text)
+        sys.exit(0)
+
+    def run(self, stdscr):
+        """Main interactive curses loop."""
+        self.stdscr = stdscr
+        set_cursor_visibility(False)
+        self.setup_colors()
+
+        # Set curses escape delay to 25ms to eliminate Esc latency
+        if hasattr(curses, "set_escdelay"):
+            try:
+                curses.set_escdelay(25)
+            except Exception:
+                pass
+
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+            curses.mouseinterval(0)
+        except Exception:
+            pass
+
+        max_y, max_x = stdscr.getmaxyx()
+        self.last_width = max_x
+
+        if self.query:
+            self.load_query(self.query)
+        else:
+            new_q = self.prompt_text(stdscr, "Command to lookup (Enter skips): ", initial_prompt=True)
+            if new_q is None:
+                # User pressed Esc or Ctrl+C to cancel
+                return
+            elif new_q == "":
+                # User pressed Enter with empty input: show introductory guide
+                self.load_welcome_page()
+            else:
+                self.history = [new_q]
+                self.history_idx = 0
+                self.load_query(new_q)
+
+        while True:
+            max_y, max_x = stdscr.getmaxyx()
+            if max_x != self.last_width:
+                self.prepare_display_lines(max_x)
+
+            self.draw(stdscr)
+
+            # Auto-timeout for flash message so it disappears on its own without needing user input
+            now = time.time()
+            if self.flash_message and now < self.flash_until:
+                rem_ms = max(50, int((self.flash_until - now) * 1000))
+                stdscr.timeout(rem_ms)
+            else:
+                self.flash_message = ""
+                stdscr.timeout(-1)
+
+            try:
+                key = stdscr.getch()
+            except KeyboardInterrupt:
+                break
+
+            # Handle timeout expiration
+            if key == -1:
+                continue
+
+            # 1. Exit
+            if key in (ord('q'), ord('Q'), 3):
+                break
+
+            # 2. Command selection (Tab / Shift-Tab)
+            elif key in (9, ord('\t')):  # Tab
+                self.navigate_command(forward=True)
+            elif key in (curses.KEY_BTAB, 353):  # Shift + Tab
+                self.navigate_command(forward=False)
+
+            # 3. Yank / Copy ('y')
+            elif key in (ord('y'), ord('Y')):
+                cmd_text = self.get_active_command_text()
+                if cmd_text:
+                    if copy_to_clipboard(cmd_text):
+                        preview = cmd_text if len(cmd_text) < 35 else cmd_text[:32] + "..."
+                        self.set_flash(f" ✓ Copied: {preview} ")
+                    else:
+                        self.set_flash(" Failed to copy to clipboard ")
+                else:
+                    self.set_flash(" No command found to copy ")
+
+            # 4. Inject into terminal (Enter)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                cmd_text = self.get_active_command_text()
+                if cmd_text:
+                    self.inject_or_exit(cmd_text)
+                else:
+                    self.set_flash(" Select a command with [Tab] or search first ")
+
+            # 5. In-document search ('/')
+            elif key == ord('/'):
+                query = self.prompt_text(stdscr, " Search in document: ")
+                if query is not None:
+                    self.perform_search(query)
+
+            # Search navigation ('n' / 'N')
+            elif key in (ord('n'),):
+                self.next_search_match(forward=True)
+            elif key in (ord('N'),):
+                self.next_search_match(forward=False)
+
+            # Clear search / selection (Escape): immediate clearing with zero lag
+            elif key == 27:
+                self.search_query = ""
+                self.search_matches = []
+                self.selected_cmd_idx = -1
+                self.flash_message = ""
+                self.flash_until = 0.0
+
+            # 6. Personal cheatsheets menu ('c')
+            elif key in (ord('c'), ord('C')):
+                self.show_customs_menu(stdscr)
+
+            # 7. Shell aliases menu ('a')
+            elif key in (ord('a'), ord('A')):
+                self.show_aliases_menu(stdscr)
+
+            # 8. Switch command ('s' or 'o')
+            elif key in (ord('s'), ord('S'), ord('o'), ord('O')):
+                new_q = self.prompt_text(stdscr, " Search command: ")
+                if new_q:
+                    self.history = self.history[:self.history_idx + 1]
+                    self.history.append(new_q)
+                    self.history_idx = len(self.history) - 1
+                    self.load_query(new_q)
+
+            # 9. Cycle source ('t')
+            elif key in (ord('t'), ord('T')):
+                self.cycle_source()
+
+            # 10. History navigation ('[' / ']' or 'H' / 'L')
+            elif key in (ord('['), ord('h'), ord('H')):
+                if self.history_idx > 0:
+                    self.history_idx -= 1
+                    self.load_query(self.history[self.history_idx])
+                    self.set_flash(f" History: {self.history[self.history_idx]} ")
+                else:
+                    self.set_flash(" Reached start of history ")
+            elif key in (ord(']'), ord('l'), ord('L')):
+                if self.history_idx < len(self.history) - 1:
+                    self.history_idx += 1
+                    self.load_query(self.history[self.history_idx])
+                    self.set_flash(f" History: {self.history[self.history_idx]} ")
+                else:
+                    self.set_flash(" Reached end of history ")
+
+            # 11. Force Reload ('r')
+            elif key in (ord('r'), ord('R')):
+                if self.query:
+                    self.load_query(self.query, force_refresh=True)
+                    self.set_flash(f" Reloaded {self.query} from online cheat.sh ")
+
+            # 12. Mouse Wheel Navigation
+            elif key == curses.KEY_MOUSE:
+                try:
+                    _, _, _, _, bstate = curses.getmouse()
+                    wheel_up = (
+                        getattr(curses, "BUTTON4_PRESSED", 0)
+                        | getattr(curses, "BUTTON4_CLICKED", 0)
+                        | getattr(curses, "BUTTON4_DOUBLE_CLICKED", 0)
+                        | getattr(curses, "BUTTON4_TRIPLE_CLICKED", 0)
+                        | 0x10000
+                    )
+                    wheel_down = (
+                        getattr(curses, "BUTTON5_PRESSED", 0)
+                        | getattr(curses, "BUTTON5_CLICKED", 0)
+                        | getattr(curses, "BUTTON5_DOUBLE_CLICKED", 0)
+                        | getattr(curses, "BUTTON5_TRIPLE_CLICKED", 0)
+                        | 0x200000
+                    )
+                    if bstate & wheel_up:
+                        self.scroll_y = max(0, self.scroll_y - 3)
+                    elif bstate & wheel_down:
+                        max_scroll = max(0, len(self.display_lines) - (curses.LINES - 2))
+                        self.scroll_y = min(max_scroll, self.scroll_y + 3)
+                except curses.error:
+                    pass
+
+            # 13. Keyboard Scrolling
+            elif key in (curses.KEY_UP, ord('k'), ord('K')):
+                self.scroll_y = max(0, self.scroll_y - 1)
+            elif key in (curses.KEY_DOWN, ord('j'), ord('J')):
+                max_scroll = max(0, len(self.display_lines) - (curses.LINES - 2))
+                self.scroll_y = min(max_scroll, self.scroll_y + 1)
+            elif key in (curses.KEY_PPAGE, ord('u'), ord('U')):
+                half_page = max(1, (curses.LINES - 2) // 2)
+                self.scroll_y = max(0, self.scroll_y - half_page)
+            elif key in (curses.KEY_NPAGE, ord('d'), ord('D'), ord(' ')):
+                half_page = max(1, (curses.LINES - 2) // 2)
+                max_scroll = max(0, len(self.display_lines) - (curses.LINES - 2))
+                self.scroll_y = min(max_scroll, self.scroll_y + half_page)
+            elif key in (curses.KEY_HOME, ord('g')):
+                self.scroll_y = 0
+            elif key in (curses.KEY_END, ord('G')):
+                max_scroll = max(0, len(self.display_lines) - (curses.LINES - 2))
+                self.scroll_y = max_scroll
+            elif key == curses.KEY_RESIZE:
+                max_scroll = max(0, len(self.display_lines) - (curses.LINES - 2))
+                self.scroll_y = max(0, min(self.scroll_y, max_scroll))
+
+    def setup_colors(self):
+        """Initialize color pairs safely using configured theme variables."""
+        if not curses.has_colors():
+            return
+
+        try:
+            curses.start_color()
+        except Exception:
+            return
+
+        bg_color = -1
+        try:
+            curses.use_default_colors()
+        except Exception:
+            bg_color = curses.COLOR_BLACK
+
+        has_256 = curses.COLORS >= 256
+        sel_bg_cfg = get_theme_color("selected_bg", COLOR_SELECTED_BG)
+        if has_256 and isinstance(sel_bg_cfg, int) and sel_bg_cfg >= 0:
+            sel_bg = sel_bg_cfg
+        else:
+            sel_bg_fb = get_theme_color("selected_bg_fallback", COLOR_SELECTED_BG_FALLBACK)
+            sel_bg = resolve_curses_color(sel_bg_fb, curses.COLOR_BLUE)
+
+        def safe_init(pair_id, fg_val, bg_val=None):
+            resolved_fg = resolve_curses_color(fg_val, curses.COLOR_WHITE)
+            resolved_bg = bg_color if bg_val is None else resolve_curses_color(bg_val, bg_color)
+            try:
+                curses.init_pair(pair_id, resolved_fg, resolved_bg)
+            except Exception:
+                try:
+                    fallback_bg = curses.COLOR_BLACK if bg_val is None else resolve_curses_color(bg_val, curses.COLOR_BLACK)
+                    curses.init_pair(pair_id, resolved_fg, fallback_bg)
+                except Exception:
+                    pass
+
+        # Content & Syntax Pairs
+        safe_init(ColorPairs.COMMENT, get_theme_color("comment", COLOR_COMMENT))
+        safe_init(ColorPairs.COMMAND, get_theme_color("command", COLOR_COMMAND))
+        safe_init(ColorPairs.FLAG, get_theme_color("flag", COLOR_FLAG))
+        safe_init(ColorPairs.SECTION_HEADER, get_theme_color("section_header", COLOR_SECTION_HEADER))
+        safe_init(ColorPairs.HEADER, get_theme_color("header", COLOR_HEADER))
+        safe_init(ColorPairs.FOOTER, get_theme_color("footer", COLOR_FOOTER))
+        safe_init(ColorPairs.PARAM, get_theme_color("param", COLOR_PARAM))
+
+        # Search Match Pairs
+        search_inact_fg = get_theme_color("search_inactive_fg", COLOR_SEARCH_INACTIVE_FG)
+        search_inact_bg = get_theme_color("search_inactive_bg", COLOR_SEARCH_INACTIVE_BG)
+        safe_init(ColorPairs.SEARCH_INACTIVE, search_inact_fg, search_inact_bg)
+
+        search_act_fg = get_theme_color("search_active_fg", COLOR_SEARCH_ACTIVE_FG)
+        search_act_bg = get_theme_color("search_active_bg", COLOR_SEARCH_ACTIVE_BG)
+        safe_init(ColorPairs.SEARCH_ACTIVE, search_act_fg, search_act_bg)
+
+        # Selected Row Pairs (with highlighted background)
+        safe_init(ColorPairs.SELECTED_COMMAND, get_theme_color("selected_command", COLOR_SELECTED_COMMAND), sel_bg)
+        safe_init(ColorPairs.SELECTED_FLAG, get_theme_color("selected_flag", COLOR_SELECTED_FLAG), sel_bg)
+        safe_init(ColorPairs.SELECTED_PARAM, get_theme_color("selected_param", COLOR_SELECTED_PARAM), sel_bg)
+        safe_init(ColorPairs.SELECTED_ARG, get_theme_color("selected_arg", COLOR_SELECTED_ARG), sel_bg)
+        safe_init(ColorPairs.SELECTED_ROW_FILL, get_theme_color("selected_base", COLOR_SELECTED_BASE), sel_bg)
+        safe_init(ColorPairs.SELECTED_COMMENT, get_theme_color("selected_comment", COLOR_SELECTED_COMMENT), sel_bg)
+
+        # UI & Menu Pairs
+        safe_init(ColorPairs.PROMPT, get_theme_color("prompt", COLOR_PROMPT))
+        safe_init(ColorPairs.FLASH, get_theme_color("flash", COLOR_FLASH))
+        safe_init(ColorPairs.MENU_HEADER, get_theme_color("menu_header", COLOR_MENU_HEADER))
+        safe_init(ColorPairs.MENU_PROMPT, get_theme_color("menu_prompt", COLOR_MENU_PROMPT))
+        safe_init(ColorPairs.MENU_ITEM, get_theme_color("menu_item", COLOR_MENU_ITEM))
+        safe_init(ColorPairs.MENU_DESC, get_theme_color("menu_desc", COLOR_MENU_DESC))
+        safe_init(ColorPairs.MENU_BADGE_ZSHRC, get_theme_color("menu_badge_zshrc", COLOR_MENU_BADGE_ZSHRC))
+        safe_init(ColorPairs.MENU_BADGE_SHELL, get_theme_color("menu_badge_shell", COLOR_MENU_BADGE_SHELL))
+        safe_init(ColorPairs.MENU_FOOTER, get_theme_color("menu_footer", COLOR_MENU_FOOTER))
+
+    def draw(self, stdscr):
+        """Render layout and highlighted tokens with full-line command selection background."""
+        max_y, max_x = stdscr.getmaxyx()
+        stdscr.erase()
+
+        if max_y < 4 or max_x < 10:
+            stdscr.refresh()
+            return
+
+        # 1. Header Bar
+        title = f" CHEAT-SHEET: {self.query or '(none)'} "
+        badge_str = f"[{self.source_badge}] " if self.source_badge else ""
+        shortcuts = " [/] Find  [s] Cmd  [c] Customs  [a] Aliases  [Tab] Pick  [q] Quit "
+
+        left = f"───{title}{badge_str}"
+        right = f"{shortcuts}───"
+        fill = max(0, max_x - 1 - len(left) - len(right))
+        header_text = (left + ("─" * fill) + right)[:max_x - 1]
+
+        try:
+            stdscr.attron(curses.color_pair(ColorPairs.HEADER) | curses.A_BOLD)
+            stdscr.addstr(0, 0, header_text)
+            stdscr.attroff(curses.color_pair(ColorPairs.HEADER) | curses.A_BOLD)
+        except curses.error:
+            pass
+
+        # 2. Content Area
+        content_height = max_y - 2
+        selected_cmd_id = -1
+        if self.selected_cmd_idx != -1 and self.selected_cmd_idx < len(self.selectable_commands):
+            selected_cmd_id = self.selectable_commands[self.selected_cmd_idx]["cmd_id"]
+
+        for idx in range(content_height):
+            line_idx = self.scroll_y + idx
+            row_y = idx + 1
+
+            if line_idx >= len(self.display_lines):
+                break
+
+            dline = self.display_lines[line_idx]
+            is_cmd_selected = (dline.cmd_id is not None and dline.cmd_id == selected_cmd_id)
+
+            # Highlight full line with background color if this command is currently selected
+            if is_cmd_selected:
+                try:
+                    stdscr.attron(curses.color_pair(ColorPairs.SELECTED_ROW_FILL))
+                    stdscr.addstr(row_y, 0, " " * (max_x - 1))
+                    stdscr.attroff(curses.color_pair(ColorPairs.SELECTED_ROW_FILL))
+                except curses.error:
+                    pass
+
+            # Gutter indicator
+            col_x = 0
+            if is_cmd_selected:
+                if not dline.is_continuation:
+                    gutter_char = "▶ "
+                    gutter_attr = curses.color_pair(ColorPairs.SELECTED_COMMAND) | curses.A_BOLD
+                else:
+                    gutter_char = "  "
+                    gutter_attr = curses.color_pair(ColorPairs.SELECTED_ROW_FILL)
+            else:
+                gutter_char = "  "
+                gutter_attr = curses.A_NORMAL
+
+            try:
+                stdscr.attron(gutter_attr)
+                stdscr.addstr(row_y, 0, gutter_char)
+                stdscr.attroff(gutter_attr)
+            except curses.error:
+                pass
+            col_x += len(gutter_char)
+
+            # Find search matches on this line
+            line_matches = []
+            if self.search_query:
+                line_matches = [
+                    (s, e, m_idx) for (l, s, e, m_idx) in self.search_matches if l == line_idx
+                ]
+
+            # Render tokens
+            token_offset = 0
+            for token_text, token_type in dline.tokens:
+                if col_x >= max_x - 1:
+                    break
+
+                if is_cmd_selected:
+                    if token_type == "comment":
+                        attr = curses.color_pair(ColorPairs.SELECTED_COMMENT) | curses.A_DIM
+                    elif token_type == "command":
+                        attr = curses.color_pair(ColorPairs.SELECTED_COMMAND) | curses.A_BOLD
+                    elif token_type == "flag":
+                        attr = curses.color_pair(ColorPairs.SELECTED_FLAG) | curses.A_BOLD
+                    elif token_type == "header":
+                        attr = curses.color_pair(ColorPairs.SECTION_HEADER) | curses.A_BOLD | curses.A_UNDERLINE
+                    elif token_type == "param":
+                        attr = curses.color_pair(ColorPairs.SELECTED_PARAM) | curses.A_BOLD
+                    elif token_type == "arg":
+                        attr = curses.color_pair(ColorPairs.SELECTED_ARG) | curses.A_BOLD
+                    else:
+                        attr = curses.color_pair(ColorPairs.SELECTED_ROW_FILL)
+                else:
+                    attr = curses.A_NORMAL
+                    if token_type == "comment":
+                        attr = curses.color_pair(ColorPairs.COMMENT) | curses.A_DIM
+                    elif token_type == "command":
+                        attr = curses.color_pair(ColorPairs.COMMAND) | curses.A_BOLD
+                    elif token_type == "flag":
+                        attr = curses.color_pair(ColorPairs.FLAG) | curses.A_BOLD
+                    elif token_type == "header":
+                        attr = curses.color_pair(ColorPairs.SECTION_HEADER) | curses.A_BOLD | curses.A_UNDERLINE
+                    elif token_type == "param":
+                        attr = curses.color_pair(ColorPairs.PARAM)
+                    elif token_type == "arg":
+                        attr = curses.color_pair(ColorPairs.FOOTER) | curses.A_BOLD
+
+                tok_start = token_offset
+                tok_end = token_offset + len(token_text)
+                token_offset += len(token_text)
+
+                slices = []
+                curr = 0
+                for m_start, m_end, m_idx in line_matches:
+                    if m_end <= tok_start or m_start >= tok_end:
+                        continue
+                    rel_s = max(0, m_start - tok_start)
+                    rel_e = min(len(token_text), m_end - tok_start)
+                    is_active = (m_idx == self.search_match_idx)
+                    if rel_s > curr:
+                        slices.append((token_text[curr:rel_s], False, False))
+                    slices.append((token_text[rel_s:rel_e], True, is_active))
+                    curr = rel_e
+                if curr < len(token_text):
+                    slices.append((token_text[curr:], False, False))
+
+                if not slices:
+                    slices = [(token_text, False, False)]
+
+                for slice_text, is_match, is_active in slices:
+                    clipped = slice_text[:max_x - 1 - col_x]
+                    if not clipped:
+                        break
+                    if is_match:
+                        pair = ColorPairs.SEARCH_ACTIVE if is_active else ColorPairs.SEARCH_INACTIVE
+                        active_attr = curses.color_pair(pair) | curses.A_BOLD
+                    else:
+                        active_attr = attr
+
+                    try:
+                        stdscr.attron(active_attr)
+                        stdscr.addstr(row_y, col_x, clipped)
+                        stdscr.attroff(active_attr)
+                    except curses.error:
+                        pass
+                    col_x += len(clipped)
+
+        # 3. Footer Bar
+        now = time.time()
+        if self.flash_message and now < self.flash_until:
+            footer_text = f" {self.flash_message} "[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.FLASH) | curses.A_BOLD)
+                stdscr.addstr(max_y - 1, 0, footer_text)
+                stdscr.attroff(curses.color_pair(ColorPairs.FLASH) | curses.A_BOLD)
+            except curses.error:
+                pass
+        elif self.search_query:
+            match_info = f" Match {self.search_match_idx + 1}/{len(self.search_matches)} " if self.search_matches else " No matches "
+            hint = " 'n'/'N' Next/Prev  •  'Esc' Clear "
+            fill = max(0, max_x - 1 - len(match_info) - len(hint))
+            footer_text = (match_info + (" " * fill) + hint)[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.PROMPT) | curses.A_BOLD)
+                stdscr.addstr(max_y - 1, 0, footer_text)
+                stdscr.attroff(curses.color_pair(ColorPairs.PROMPT) | curses.A_BOLD)
+            except curses.error:
+                pass
+        elif is_cmd_selected:
+            sel_hint = " ▶ [Enter] Inject to terminal  •  [y] Copy  •  [Tab] Next cmd  •  [Esc] Clear "
+            footer_text = sel_hint[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.COMMAND) | curses.A_BOLD)
+                stdscr.addstr(max_y - 1, 0, footer_text)
+                stdscr.attroff(curses.color_pair(ColorPairs.COMMAND) | curses.A_BOLD)
+            except curses.error:
+                pass
+        else:
+            total = max(1, len(self.display_lines))
+            current = min(total, self.scroll_y + 1)
+            pct = int((min(total, self.scroll_y + content_height) / total) * 100)
+            src_hint = f" [t] Source ({len(self.source_keys)})" if len(self.source_keys) > 1 else ""
+            pos_str = f" Lines {current}-{min(total, self.scroll_y + content_height)}/{total} ({pct}%) "
+            actions = f" [Tab] Pick  •  [y] Copy  •  [c] Customs  •  [a] Aliases  •  [/] Find{src_hint} "
+            fill = max(0, max_x - 1 - len(pos_str) - len(actions))
+            footer_text = (pos_str + (" " * fill) + actions)[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.FOOTER) | curses.A_DIM)
+                stdscr.addstr(max_y - 1, 0, footer_text)
+                stdscr.attroff(curses.color_pair(ColorPairs.FOOTER) | curses.A_DIM)
+            except curses.error:
+                pass
+
+        stdscr.refresh()
+
+    def prompt_text(self, stdscr, prompt_label, initial_prompt=False):
+        """Prompt user for input string at bottom line."""
+        max_y, max_x = stdscr.getmaxyx()
+        set_cursor_visibility(True)
+
+        input_str = ""
+        while True:
+            prompt_line = f"{prompt_label}{input_str}"[:max_x - 1]
+            try:
+                stdscr.attron(curses.color_pair(ColorPairs.PROMPT) | curses.A_BOLD)
+                stdscr.addstr(max_y - 1, 0, " " * (max_x - 1))
+                stdscr.addstr(max_y - 1, 0, prompt_line)
+                stdscr.attroff(curses.color_pair(ColorPairs.PROMPT) | curses.A_BOLD)
+                cursor_pos = min(max_x - 1, len(prompt_line))
+                stdscr.move(max_y - 1, cursor_pos)
+                stdscr.refresh()
+            except curses.error:
+                pass
+
+            ch = stdscr.getch()
+            if ch in (curses.KEY_ENTER, 10, 13):
+                set_cursor_visibility(False)
+                return input_str.strip()
+            elif ch in (27, 3):  # Esc or Ctrl+C
+                set_cursor_visibility(False)
+                return None
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                input_str = input_str[:-1]
+            elif 32 <= ch <= 126:
+                if len(prompt_label) + len(input_str) < max_x - 2:
+                    input_str += chr(ch)
+
+
+# ----------------------------------------------------------------------
+# CLI & Terminal Output
+# ----------------------------------------------------------------------
+
+def colorize_ansi(line):
+    """Format single line with ANSI terminal escape sequences matching theme."""
+    tokens, line_type = parse_line_tokens(line)
+
+    comment_esc = to_ansi_escape(get_theme_color("comment", COLOR_COMMENT), is_dim=True)
+    command_esc = to_ansi_escape(get_theme_color("command", COLOR_COMMAND), is_bold=True)
+    flag_esc = to_ansi_escape(get_theme_color("flag", COLOR_FLAG), is_bold=True)
+    header_esc = to_ansi_escape(get_theme_color("section_header", COLOR_SECTION_HEADER), is_bold=True, is_underline=True)
+    param_esc = to_ansi_escape(get_theme_color("param", COLOR_PARAM))
+    arg_esc = to_ansi_escape(get_theme_color("arg", COLOR_ARG), is_bold=True)
+    reset_esc = "\033[0m"
+
+    colored = ""
+    for text, token_type in tokens:
+        if token_type == "comment":
+            colored += f"{comment_esc}{text}{reset_esc}"
+        elif token_type == "command":
+            colored += f"{command_esc}{text}{reset_esc}"
+        elif token_type == "flag":
+            colored += f"{flag_esc}{text}{reset_esc}"
+        elif token_type == "header":
+            colored += f"{header_esc}{text}{reset_esc}"
+        elif token_type == "param":
+            colored += f"{param_esc}{text}{reset_esc}"
+        elif token_type == "arg":
+            colored += f"{arg_esc}{text}{reset_esc}"
+        else:
+            colored += text
+    return colored
+
+
+def print_help():
+    """Print command-line help."""
+    help_text = """Usage: cheat-sheet [OPTIONS] [COMMAND]
+
+Fast terminal cheatsheet viewer using cheat.sh, local man pages, custom sheets, and aliases.
+
+Arguments:
+  COMMAND               Command or subcommand to look up (e.g. tar, git commit, find)
+
+Options:
+  -h, --help            Show this help message and exit
+  -n, --no-pager        Print cheatsheet directly to stdout without interactive TUI
+  -r, --refresh         Force re-fetch from online source, ignoring local cache
+  --tmux-target PANE    Specify target tmux pane ID for command injection
+
+Interactive Keys:
+  q, Ctrl+C             Exit immediately
+  Tab, Shift+Tab        Jump to next / previous executable command example (highlighted)
+  y                     Yank (copy) selected command to system & tmux clipboard
+  Enter                 Inject selected command into terminal prompt and exit
+  /                     Search text within current document (active match in green)
+  n, N                  Next / previous search occurrence (auto-selects command)
+  Esc                   Clear search highlight and command selection instantly
+  c                     Show personal cheatsheets menu (~/.cheat-sheet/sheets/)
+  a                     Show shell aliases menu (explicit .zshrc first, [Tab] all)
+  s, o                  Search / switch to another command
+  t                     Cycle documentation source (cheat.sh <-> man <-> --help <-> personal)
+  [, ] or H, L          Go backward / forward in session command history
+  r                     Reload current cheatsheet from online source
+  j, k, Up, Down        Scroll line by line
+  d, u, PgDn/Up         Scroll half page
+  g, G                  Jump to top / bottom
+  Mouse Wheel           Smooth scroll up and down
+"""
+    print(help_text)
+
+
+def main():
+    args = sys.argv[1:]
+    use_pager = True
+    force_refresh = False
+    tmux_target = None
+    query_parts = []
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-h", "--help"):
+            print_help()
+            sys.exit(0)
+        elif arg in ("-n", "--no-pager"):
+            use_pager = False
+        elif arg in ("-r", "--refresh"):
+            force_refresh = True
+        elif arg == "--tmux-target" and i + 1 < len(args):
+            tmux_target = args[i + 1]
+            i += 1
+        else:
+            query_parts.append(arg)
+        i += 1
+
+    query = " ".join(query_parts).strip()
+
+    # Non-interactive stdout mode
+    if not use_pager:
+        if not query:
+            print_help()
+            sys.exit(1)
+
+        sources = discover_sources(query, force_refresh=force_refresh)
+        if sources:
+            source_key = list(sources.keys())[0]
+            lines, badge = sources[source_key]
+            is_tty = sys.stdout.isatty()
+            header = f"=== Cheat Sheet: {query} [{badge}] ===\n"
+            if is_tty:
+                print(f"\033[1;32m{header}\033[0m")
+                for line in lines:
+                    print(colorize_ansi(line))
+            else:
+                print(header + "\n".join(lines))
+        else:
+            print(f"No documentation found for '{query}'.", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # Interactive Curses TUI mode
+    if curses is None:
+        print("Error: Python curses module is required for interactive mode.", file=sys.stderr)
+        print("Use -n / --no-pager to print to stdout.", file=sys.stderr)
+        sys.exit(1)
+
+    tui = CheatsheetTUI(initial_query=query, tmux_target=tmux_target)
+    try:
+        curses.wrapper(tui.run)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    main()

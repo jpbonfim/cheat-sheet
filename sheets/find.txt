@@ -1,0 +1,14 @@
+# Find File Searching & Filtering
+# Locate files by size, date, permissions, and extensions
+
+# Find files modified within the last 24 hours
+find . -type f -mtime -1 -not -path '*/.*'
+
+# Find files larger than 100MB in current directory hierarchy
+find . -type f -size +100M -exec ls -lh {} +
+
+# Find and delete all empty directories recursively
+find . -type d -empty -delete
+
+# Find all files with specific extension case-insensitively
+find . -type f -iname "*.md"

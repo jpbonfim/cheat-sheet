@@ -1,0 +1,14 @@
+# Tar Archiving & Compression
+# Archive and extract files using gzip, bzip2, and xz
+
+# Create a compressed tar.gz archive from a folder
+tar -czvf archive.tar.gz /path/to/directory
+
+# Extract an archive to the current working directory
+tar -xzvf archive.tar.gz
+
+# Extract an archive into a specific destination directory
+tar -xzvf archive.tar.gz -C /path/to/destination
+
+# List contents of an archive without extracting
+tar -tzvf archive.tar.gz

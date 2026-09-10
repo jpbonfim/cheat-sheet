@@ -1,0 +1,20 @@
+# Git Developer Workflows & Utilities
+# Everyday git commands for branches, rebasing, stashing, and history
+
+# View pretty one-line commit log with visual branch graph
+git log --graph --oneline --decorate --all
+
+# Interactively stage specific lines/hunks of changed files
+git add -p <file>
+
+# Stash current untracked and modified changes with a descriptive message
+git stash push -u -m "wip: feature progress"
+
+# Undo the last commit while keeping all changes staged in index
+git reset --soft HEAD~1
+
+# Discard all unstaged changes in working directory
+git restore .
+
+# Prune stale remote-tracking references that were deleted on origin
+git remote prune origin

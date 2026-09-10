@@ -1,0 +1,17 @@
+# Docker Everyday Operations
+# Useful commands for managing containers, images, volumes, and networks
+
+# Clean up stopped containers, unused networks, and dangling images
+docker system prune -af --volumes
+
+# Stream container logs with timestamps and follow output
+docker logs -f --tail 100 -t <container_name>
+
+# Inspect container IP address on default bridge network
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <container_name>
+
+# Execute an interactive bash/sh shell inside a running container
+docker exec -it <container_name> /bin/sh
+
+# Show live resource usage (CPU, Memory, Net I/O) of all active containers
+docker stats --no-trunc --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"
