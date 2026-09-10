@@ -29,6 +29,12 @@ _bash_cheat_widget() {
       toggle_script="${HOME}/.tmux/scripts/toggle-cheat-sheet.sh"
     elif [[ -x "${HOME}/.local/bin/toggle-cheat-sheet.sh" ]]; then
       toggle_script="${HOME}/.local/bin/toggle-cheat-sheet.sh"
+    else
+      local script_dir
+      script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../tmux" 2>/dev/null && pwd)/toggle-cheat-sheet.sh"
+      if [[ -x "$script_dir" ]]; then
+        toggle_script="$script_dir"
+      fi
     fi
 
     if [[ -n "$toggle_script" ]]; then
@@ -41,11 +47,18 @@ _bash_cheat_widget() {
     fi
   fi
 
+  local sel_file
+  sel_file="$(mktemp "${TMPDIR:-/tmp}/cheat-sel.XXXXXX")"
   if [[ -n "$cmd" ]]; then
-    cheat-sheet "$cmd" </dev/tty >/dev/tty 2>&1
+    CHEAT_SHEET_SELECTION_FILE="$sel_file" cheat-sheet "$cmd" </dev/tty >/dev/tty 2>&1
   else
-    cheat-sheet </dev/tty >/dev/tty 2>&1
+    CHEAT_SHEET_SELECTION_FILE="$sel_file" cheat-sheet </dev/tty >/dev/tty 2>&1
   fi
+  if [[ -s "$sel_file" ]]; then
+    READLINE_LINE="$(<"$sel_file")"
+    READLINE_POINT=${#READLINE_LINE}
+  fi
+  rm -f "$sel_file"
 }
 
 bind -x '"\e/": _bash_cheat_widget'

@@ -52,11 +52,18 @@ _tmux_cheat_widget() {
     fi
   else
     zle -I
+    local sel_file
+    sel_file="$(mktemp "${TMPDIR:-/tmp}/cheat-sel.XXXXXX")"
     if [[ -n "$cmd" ]]; then
-      cheat-sheet "$cmd" </dev/tty >/dev/tty 2>&1
+      CHEAT_SHEET_SELECTION_FILE="$sel_file" cheat-sheet "$cmd" </dev/tty >/dev/tty 2>&1
     else
-      cheat-sheet </dev/tty >/dev/tty 2>&1
+      CHEAT_SHEET_SELECTION_FILE="$sel_file" cheat-sheet </dev/tty >/dev/tty 2>&1
     fi
+    if [[ -s "$sel_file" ]]; then
+      BUFFER="$(<"$sel_file")"
+      CURSOR=${#BUFFER}
+    fi
+    rm -f "$sel_file"
     zle -R
   fi
 }
