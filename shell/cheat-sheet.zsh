@@ -64,10 +64,21 @@ _tmux_cheat_widget() {
       CURSOR=${#BUFFER}
     fi
     rm -f "$sel_file"
-    zle -R
+
+    # Completely clear autosuggest ghost text and refresh prompt
+    POSTDISPLAY=""
+    if (( $+functions[_zsh_autosuggest_clear] )); then
+      _zsh_autosuggest_clear
+    fi
+    zle reset-prompt
   fi
 }
 
 zle -N _tmux_cheat_widget
 bindkey '^[\/' _tmux_cheat_widget  # Shortcut: Alt + /
 alias cheat="cheat-sheet"
+
+# Ensure zsh-autosuggestions clears ghost text when triggering the widget
+if [[ -n "${ZSH_AUTOSUGGEST_CLEAR_WIDGETS+x}" ]]; then
+  ZSH_AUTOSUGGEST_CLEAR_WIDGETS+=(_tmux_cheat_widget)
+fi
