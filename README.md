@@ -12,6 +12,11 @@ A fast, zero-dependency interactive cheatsheet viewer and alias navigator for th
 
 `cheat-sheet` provides instant access to command-line references, personal cheatsheets, and shell aliases directly inside your terminal workflow. Built entirely using the Python standard library, it requires no external packages and launches instantly as a full-screen TUI or a slide-out Tmux sidebar pane.
 
+<p align="center">
+<img width="800" height="417" alt="cheat-sheet" src="https://github.com/user-attachments/assets/d8fd33dc-21c7-4bfb-9e0c-62e083f1a76e" />
+</p>
+
+
 ## Features
 
 - **Zero External Dependencies**: Implemented purely with Python 3 standard library modules (`curses`, `urllib`). No `pip` installations or heavy runtime dependencies required.
